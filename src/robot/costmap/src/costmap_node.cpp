@@ -4,9 +4,12 @@
 #include "costmap_node.hpp"
  
 CostmapNode::CostmapNode() : Node("costmap"), costmap_(robot::CostmapCore(this->get_logger())) {
-  // Initialize the constructs and their parameters
-  string_pub_ = this->create_publisher<std_msgs::msg::String>("/test_topic", 10);
-  timer_ = this->create_wall_timer(std::chrono::milliseconds(500), std::bind(&CostmapNode::publishMessage, this));
+  // Subscribe to lidar scans
+  lidar_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>("/lidar", 10,
+               std::bind(&CostmapNode::laserCallback, this, std::placeholders::_1));
+
+  // Publisher for the costmap I will create later
+  costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", 10);
 }
  
 // Define the timer to publish a message every 500ms
