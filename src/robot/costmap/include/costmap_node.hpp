@@ -1,8 +1,10 @@
 #ifndef COSTMAP_NODE_HPP_
 #define COSTMAP_NODE_HPP_
- 
+
+#include <cstdint>
+#include <vector>
+
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/string.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
  
@@ -11,16 +13,32 @@
 class CostmapNode : public rclcpp::Node {
   public:
     CostmapNode();
-    
-    // Place callback function here
-    void publishMessage();
-    void laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan);
- 
+   
   private:
+    // Callback
+    void laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan);
+
+    // Helper Functions
+    void initializeCostmap();
+    void convertToGrid(double range, double angle, int& x_grid, int& y_grid);
+    void markObstacle(int x_grid, int y_grid);
+    void inflateObstacles();
+    void publishCostmap();
+
+    // The costmap data
+    std::vector<std::vector<int8_t>> costmap_grid_;
+
+    // Parameters for Costmap
+    double resolution_ = 0.1; // meters per cell
+    int width_ = 200; // number of grid cells
+    int height_ = 200; // number of grid cells
+    int origin_x_grid_ = width_ / 2;
+    int origin_y_grid_ = height_ / 2;
+    double inflation_radius_= 1.0; // inflation radius (in meters)
+    int max_cost_ = 100;
+
     robot::CostmapCore costmap_;
-    // Place these constructs here
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr string_pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_sub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
 
