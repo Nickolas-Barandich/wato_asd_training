@@ -30,8 +30,8 @@ class CostmapNode : public rclcpp::Node {
 
     // Parameters for Costmap
     double resolution_ = 0.1; // meters per cell
-    int width_ = 200; // number of grid cells
-    int height_ = 200; // number of grid cells
+    int width_ = 400; // number of grid cells
+    int height_ = 400; // number of grid cells
     int origin_x_grid_ = width_ / 2;
     int origin_y_grid_ = height_ / 2;
     double inflation_radius_= 1.0; // inflation radius (in meters)

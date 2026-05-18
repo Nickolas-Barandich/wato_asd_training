@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <string>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -33,6 +34,9 @@ class MapMemoryNode : public rclcpp::Node {
     nav_msgs::msg::OccupancyGrid latest_costmap_;
     nav_msgs::msg::OccupancyGrid global_map_;
 
+    // Frame for the remembered/global map
+    std::string map_frame_id_ = "sim_world";
+
     // Robot position tracking
     double current_x_ = 0.0;
     double current_y_ = 0.0;
@@ -44,6 +48,7 @@ class MapMemoryNode : public rclcpp::Node {
     // Flags
     bool costmap_updated_ = false;
     bool should_update_map_ = false;
+    bool odom_received_ = false;
 };
 
 #endif 

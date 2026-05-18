@@ -36,6 +36,7 @@ void MapMemoryNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPt
 void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
   current_x_ = msg->pose.pose.position.x;
   current_y_ = msg->pose.pose.position.y;
+  odom_received_ = true;
 
   geometry_msgs::msg::Quaternion q = msg->pose.pose.orientation;
 
@@ -56,7 +57,7 @@ void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
 
 // Timer-based map update
 void MapMemoryNode::updateMap() {
-    if (costmap_updated_ && (should_update_map_ || global_map_.data.empty())) {
+    if (odom_received_ && costmap_updated_ && (should_update_map_ || global_map_.data.empty())) {
         integrateCostmap();
         map_pub_->publish(global_map_);
         should_update_map_ = false;
@@ -80,11 +81,45 @@ void MapMemoryNode::updateMap() {
 // Integrate the latest costmap into the global map
 void MapMemoryNode::integrateCostmap() {
   // If there is no data in global map use latest cost map
-  if (global_map_.data.empty()) {
-    global_map_ = latest_costmap_;
-    global_map_.header.stamp = this->get_clock()->now();
-    return;
-  }
+if (global_map_.data.empty()) {
+  global_map_.header.frame_id = "sim_world";
+  global_map_.header.stamp = this->get_clock()->now();
+
+  global_map_.info = latest_costmap_.info;
+
+  double map_width_meters =
+      global_map_.info.width * global_map_.info.resolution;
+
+  double map_height_meters =
+      global_map_.info.height * global_map_.info.resolution;
+
+  // Center the global map around the robot's current odom position
+  global_map_.info.origin.position.x =
+      current_x_ - map_width_meters / 2.0;
+
+  global_map_.info.origin.position.y =
+      current_y_ - map_height_meters / 2.0;
+
+  global_map_.info.origin.position.z = 0.0;
+
+  global_map_.info.origin.orientation.x = 0.0;
+  global_map_.info.origin.orientation.y = 0.0;
+  global_map_.info.origin.orientation.z = 0.0;
+  global_map_.info.origin.orientation.w = 1.0;
+
+  global_map_.data.assign(
+      static_cast<size_t>(global_map_.info.width) *
+      static_cast<size_t>(global_map_.info.height),
+      0);
+
+  RCLCPP_INFO(
+      this->get_logger(),
+      "Initialized global map origin: (%.2f, %.2f), robot: (%.2f, %.2f)",
+      global_map_.info.origin.position.x,
+      global_map_.info.origin.position.y,
+      current_x_,
+      current_y_);
+}
 
   // Run through the latest cost map
   for (int y = 0; y < latest_costmap_.info.height; y++) {
@@ -114,14 +149,12 @@ void MapMemoryNode::integrateCostmap() {
 
       int8_t local_value = latest_costmap_.data[local_index];
 
-      // Merges the value with the global costmap if greater than global value
-      if (local_value > global_map_.data[global_index]){
-        global_map_.data[global_index] = local_value;
-      }
+      global_map_.data[global_index] = local_value;
     }
   }
 
-  global_map_.header.stamp = this->get_clock()->now();
+    global_map_.header.stamp = this->get_clock()->now();
+    global_map_.header.frame_id = "sim_world";
 }
 
 int main(int argc, char ** argv)
