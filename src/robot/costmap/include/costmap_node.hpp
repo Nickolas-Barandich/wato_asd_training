@@ -21,6 +21,7 @@ class CostmapNode : public rclcpp::Node {
     // Helper Functions
     void initializeCostmap();
     void convertToGrid(double range, double angle, int& x_grid, int& y_grid);
+    void markRayFree(int end_x, int end_y);
     void markObstacle(int x_grid, int y_grid);
     void inflateObstacles();
     void publishCostmap();
@@ -35,6 +36,7 @@ class CostmapNode : public rclcpp::Node {
     int origin_x_grid_ = width_ / 2;
     int origin_y_grid_ = height_ / 2;
     double inflation_radius_= 1.0; // inflation radius (in meters)
+    int free_ray_padding_cells_ = 2;
     int max_cost_ = 100;
 
     robot::CostmapCore costmap_;
@@ -44,4 +46,4 @@ class CostmapNode : public rclcpp::Node {
 
 };
  
-#endif 
+#endif

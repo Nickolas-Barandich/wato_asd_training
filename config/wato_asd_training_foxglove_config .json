@@ -113,10 +113,10 @@
         "/map": {
           "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.5016
+          "alpha": 0.35
         },
         "/costmap": {
-          "visible": true,
+          "visible": false,
           "colorMode": "costmap",
           "alpha": 1
         },

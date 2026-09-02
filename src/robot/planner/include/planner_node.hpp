@@ -83,6 +83,7 @@ class PlannerNode : public rclcpp::Node {
     void goalCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
     void timerCallback();
+    void publishEmptyPath();
     bool goalReached();
     void planPath();
 
@@ -92,6 +93,7 @@ class PlannerNode : public rclcpp::Node {
 
     bool isCellInBounds(const CellIndex& cell);
     bool isCellFree(const CellIndex& cell);
+    std::vector<CellIndex> findStartEscape(const CellIndex& start);
 
     double heuristic(const CellIndex& a, const CellIndex& b);
     std::vector<CellIndex> getNeighbours(const CellIndex& cell);
@@ -111,8 +113,13 @@ class PlannerNode : public rclcpp::Node {
  
     bool goal_received_ = false;
     bool map_received_ = false;
+    bool odom_received_ = false;
     double goal_threshold_ = 0.5;
-    int cost_threshold_ = 100;
+    // With 2.25 m inflation, cost 20 reserves about 1.8 m of clearance.
+    int cost_threshold_ = 20;
+    int lethal_cost_ = 100;
+    int start_recovery_max_cost_ = 25;
+    int start_recovery_max_cells_ = 3;
 };
 
 #endif 

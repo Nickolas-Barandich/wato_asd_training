@@ -7,6 +7,8 @@
 #include "costmap_node.hpp"
  
 CostmapNode::CostmapNode() : Node("costmap"), costmap_(robot::CostmapCore(this->get_logger())) {
+  inflation_radius_ = this->declare_parameter<double>("inflation_radius", 2.25);
+
   // Subscribe to lidar scans
   lidar_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>("/lidar", 10,
                std::bind(&CostmapNode::laserCallback, this, std::placeholders::_1));
@@ -14,9 +16,48 @@ CostmapNode::CostmapNode() : Node("costmap"), costmap_(robot::CostmapCore(this->
   costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", 10);
 }
 
-// Initializes a 2D array [y][x] and sets all values to zero
+// Unknown cells must remain distinct from cells that a lidar ray observed as
+// free. This lets map memory clear stale readings without erasing unseen walls.
 void CostmapNode::initializeCostmap(){
-  costmap_grid_.assign(height_, std::vector<int8_t>(width_, 0));
+  costmap_grid_.assign(height_, std::vector<int8_t>(width_, -1));
+}
+
+// Bresenham ray trace from the lidar to (but not including) the endpoint.
+void CostmapNode::markRayFree(int end_x, int end_y) {
+  int x = origin_x_grid_;
+  int y = origin_y_grid_;
+  const int dx = std::abs(end_x - x);
+  const int sx = x < end_x ? 1 : -1;
+  const int dy = -std::abs(end_y - y);
+  const int sy = y < end_y ? 1 : -1;
+  int error = dx + dy;
+
+  while (x != end_x || y != end_y) {
+    // Laser samples fan apart with range (about five cells at 20 m in this
+    // simulation). Rasterize a narrow brush around each ray so observed free
+    // space is a continuous region instead of radial one-cell stripes.
+    for (int offset_y = -free_ray_padding_cells_;
+         offset_y <= free_ray_padding_cells_; ++offset_y) {
+      for (int offset_x = -free_ray_padding_cells_;
+           offset_x <= free_ray_padding_cells_; ++offset_x) {
+        const int free_x = x + offset_x;
+        const int free_y = y + offset_y;
+        if (free_x >= 0 && free_x < width_ &&
+            free_y >= 0 && free_y < height_) {
+          costmap_grid_[free_y][free_x] = 0;
+        }
+      }
+    }
+    const int twice_error = 2 * error;
+    if (twice_error >= dy) {
+      error += dy;
+      x += sx;
+    }
+    if (twice_error <= dx) {
+      error += dx;
+      y += sy;
+    }
+  }
 }
 
 // Converts polar coordinates to grid
@@ -131,25 +172,39 @@ void CostmapNode::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr sca
     // Step 1: Initialize costmap
     initializeCostmap();
  
-    // Step 2: Convert LaserScan to grid and mark obstacles
+    std::vector<std::pair<int, int>> obstacle_cells;
+
+    // Step 2: Rasterize observed free space for every scan ray.
     for (size_t i = 0; i < scan->ranges.size(); ++i) {
 
         double angle = scan->angle_min + i * scan->angle_increment;
-        double range = scan->ranges[i];
+        const double measured_range = scan->ranges[i];
+        if (std::isnan(measured_range) || measured_range <= scan->range_min) {
+          continue;
+        }
 
-        if (range < scan->range_max && range > scan->range_min) {
-            
-          // Calculate grid coordinates
-            int x_grid, y_grid;
-            convertToGrid(range, angle, x_grid, y_grid);
-            markObstacle(x_grid, y_grid);
+        const bool obstacle_hit = std::isfinite(measured_range) &&
+                                  measured_range < scan->range_max;
+        const double ray_range = obstacle_hit ? measured_range : scan->range_max;
+
+        int x_grid, y_grid;
+        convertToGrid(ray_range, angle, x_grid, y_grid);
+        markRayFree(x_grid, y_grid);
+        if (obstacle_hit) {
+          obstacle_cells.push_back({x_grid, y_grid});
         }
     }
+
+    // Step 3: Restore obstacle endpoints after all free-space rasterization.
+    // A neighbouring thick ray must never erase a real lidar return.
+    for (const auto& obstacle : obstacle_cells) {
+      markObstacle(obstacle.first, obstacle.second);
+    }
  
-    // Step 3: Inflate obstacles
+    // Step 4: Inflate obstacles
     inflateObstacles();
  
-    // Step 4: Publish costmap
+    // Step 5: Publish costmap
     publishCostmap();
 }
  

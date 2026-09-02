@@ -1,3 +1,5 @@
-# costmap_node:
-#   ros__parameters:
-
+costmap_node:
+  ros__parameters:
+    # Odom tracks the lidar near the front of the 2 m x 1 m chassis. A 2.25 m
+    # inflation radius protects the rear corner while the robot turns.
+    inflation_radius: 2.25

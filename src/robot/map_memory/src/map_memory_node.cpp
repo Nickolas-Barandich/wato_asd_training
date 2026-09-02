@@ -7,6 +7,11 @@
 #include "geometry_msgs/msg/quaternion.hpp"
 
 MapMemoryNode::MapMemoryNode() : Node("map_memory"), map_memory_(robot::MapMemoryCore(this->get_logger())) {
+  global_map_width_ = this->declare_parameter<int>("global_map_width", 400);
+  global_map_height_ = this->declare_parameter<int>("global_map_height", 400);
+  distance_threshold_ = this->declare_parameter<double>("distance_threshold", 0.5);
+  rotation_threshold_ = this->declare_parameter<double>("rotation_threshold", 0.35);
+
   // Initialize costmap subscriber
   costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>("/costmap", 10,
                  std::bind(&MapMemoryNode::costmapCallback, this, std::placeholders::_1));
@@ -16,7 +21,9 @@ MapMemoryNode::MapMemoryNode() : Node("map_memory"), map_memory_(robot::MapMemor
               std::bind(&MapMemoryNode::odomCallback, this, std::placeholders::_1));
 
   // Initialize publisher
-  map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/map", 10);
+  // Retain the latest global map for Foxglove and other late subscribers.
+  map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      "/map", rclcpp::QoS(1).reliable().transient_local());
 
   // Initialize timer
   timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&MapMemoryNode::updateMap, this));
@@ -43,12 +50,15 @@ void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
   // Quaternion to yaw formula
   current_yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
 
-  // Compute distance traveled
+  // Refresh memory after either translation or rotation.
   double distance = std::sqrt(std::pow(current_x_ - last_x_, 2) + std::pow(current_y_ - last_y_, 2));
+  double yaw_delta = std::abs(std::atan2(std::sin(current_yaw_ - last_yaw_),
+                                        std::cos(current_yaw_ - last_yaw_)));
 
-  if (distance >= distance_threshold_) {
+  if (distance >= distance_threshold_ || yaw_delta >= rotation_threshold_) {
       last_x_ = current_x_;
       last_y_ = current_y_;
+      last_yaw_ = current_yaw_;
       should_update_map_ = true;
   }
   // Debug Statement
@@ -86,6 +96,8 @@ if (global_map_.data.empty()) {
   global_map_.header.stamp = this->get_clock()->now();
 
   global_map_.info = latest_costmap_.info;
+  global_map_.info.width = static_cast<uint32_t>(global_map_width_);
+  global_map_.info.height = static_cast<uint32_t>(global_map_height_);
 
   double map_width_meters =
       global_map_.info.width * global_map_.info.resolution;
@@ -122,8 +134,8 @@ if (global_map_.data.empty()) {
 }
 
   // Run through the latest cost map
-  for (int y = 0; y < latest_costmap_.info.height; y++) {
-    for (int x = 0; x < latest_costmap_.info.width; x++) {
+  for (uint32_t y = 0; y < latest_costmap_.info.height; y++) {
+    for (uint32_t x = 0; x < latest_costmap_.info.width; x++) {
 
       // Convert the cells into meters
       double local_x = latest_costmap_.info.origin.position.x + (x + 0.5) * latest_costmap_.info.resolution;
@@ -149,7 +161,14 @@ if (global_map_.data.empty()) {
 
       int8_t local_value = latest_costmap_.data[local_index];
 
-      global_map_.data[global_index] = local_value;
+      // Unknown means the current scan provides no evidence about this cell.
+      // Only observed free/costly cells may update accumulated map memory.
+      if (local_value >= 0) {
+        // The latest known observation wins. Unknown cells are ignored, but a
+        // confirmed free ray or a newer inflation value must be able to clear
+        // stale costs; preserving maxima creates radial ghost trails.
+        global_map_.data[global_index] = local_value;
+      }
     }
   }
 

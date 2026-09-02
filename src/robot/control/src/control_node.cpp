@@ -1,6 +1,8 @@
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 
@@ -56,8 +58,22 @@ std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
     return std::nullopt;
   }
 
-  // Loops through every waypoint in the path
-  for (size_t i = 0; i < current_path_->poses.size(); i++) {
+  // Start from the waypoint closest to the robot. Searching from pose zero
+  // eventually selects an old waypoint behind the robot once it has travelled
+  // farther than the lookahead distance, which makes it turn back or stall.
+  size_t closest_index = 0;
+  double closest_distance = std::numeric_limits<double>::max();
+  for (size_t i = 0; i < current_path_->poses.size(); ++i) {
+    const double distance = computeDistance(
+        robot_position, current_path_->poses[i].pose.position);
+    if (distance < closest_distance) {
+      closest_distance = distance;
+      closest_index = i;
+    }
+  }
+
+  // Search only forward from the closest point on the path.
+  for (size_t i = closest_index; i < current_path_->poses.size(); i++) {
     // Get current waypoint
     const geometry_msgs::msg::PoseStamped& pose = current_path_->poses[i];
 
@@ -94,14 +110,23 @@ geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg:
   if (lookahead_distance < 0.001) {
     return cmd_vel;
   }
-  
+
+  const double heading_error = std::atan2(target_y_robot, target_x_robot);
+
+  // Pure pursuit becomes unstable for a target far to the side. Turn until
+  // the path is in front, then resume forward tracking.
+  if (std::abs(heading_error) > turn_in_place_angle_) {
+    cmd_vel.angular.z = std::copysign(angular_speed_, heading_error);
+    return cmd_vel;
+  }
+
   if (target_x_robot < 0.0) {
     cmd_vel.linear.x = 0.0;
 
     if (target_y_robot >= 0.0) {
-      cmd_vel.angular.z = 0.5;
+      cmd_vel.angular.z = angular_speed_;
     } else {
-      cmd_vel.angular.z = -0.5;
+      cmd_vel.angular.z = -angular_speed_;
     }
 
     return cmd_vel;
@@ -112,13 +137,22 @@ geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg:
     cmd_vel.angular.z = 0.0;
     return cmd_vel;
   }
-    // Find circle radius and then use curvature = 1/radius
-    double circle_radius = (lookahead_distance * lookahead_distance) / (2.0 * target_y_robot);
-    double curvature = 1.0 / circle_radius;
-    
-    // Using curvature, computes velocity
-    cmd_vel.linear.x = linear_speed_;
-    cmd_vel.angular.z = linear_speed_ * curvature;
+  // Run faster on straight segments for recording, then taper forward speed
+  // as the heading error grows. Angular velocity uses the same commanded
+  // speed, preserving the requested Pure Pursuit curvature.
+  const double speed_scale = std::clamp(
+      1.0 - 0.5 * std::abs(heading_error) / turn_in_place_angle_,
+      0.5, 1.0);
+  const double commanded_linear_speed = linear_speed_ * speed_scale;
+
+  // Find circle radius and then use curvature = 1/radius
+  double circle_radius = (lookahead_distance * lookahead_distance) / (2.0 * target_y_robot);
+  double curvature = 1.0 / circle_radius;
+
+  // Using curvature, computes velocity
+  cmd_vel.linear.x = commanded_linear_speed;
+  cmd_vel.angular.z = std::clamp(commanded_linear_speed * curvature,
+                                 -angular_speed_, angular_speed_);
 
     return cmd_vel;
 }

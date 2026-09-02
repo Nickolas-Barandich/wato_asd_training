@@ -43,7 +43,11 @@ class MapMemoryNode : public rclcpp::Node {
     double current_yaw_ = 0.0;
     double last_x_ = 0.0;
     double last_y_ = 0.0;
+    double last_yaw_ = 0.0;
     double distance_threshold_ = 1.5;
+    double rotation_threshold_ = 0.35;
+    int global_map_width_ = 400;
+    int global_map_height_ = 400;
 
     // Flags
     bool costmap_updated_ = false;
@@ -51,4 +55,4 @@ class MapMemoryNode : public rclcpp::Node {
     bool odom_received_ = false;
 };
 
-#endif 
+#endif

@@ -36,6 +36,17 @@ void PlannerNode::mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 }
 
 void PlannerNode::goalCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg){
+  if (!msg->header.frame_id.empty() && map_received_ &&
+      msg->header.frame_id != current_map_.header.frame_id) {
+    RCLCPP_WARN(this->get_logger(),
+      "Rejected goal in frame '%s'; expected '%s' (frame transforms are not available)",
+      msg->header.frame_id.c_str(), current_map_.header.frame_id.c_str());
+    goal_received_ = false;
+    state_ = State::WAITING_FOR_GOAL;
+    publishEmptyPath();
+    return;
+  }
+
   goal_ = *msg;
   goal_received_ = true;
 
@@ -45,7 +56,13 @@ void PlannerNode::goalCallback(const geometry_msgs::msg::PointStamped::SharedPtr
 }
 
 void PlannerNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg){
+  const bool first_odometry = !odom_received_;
   robot_pose_ = msg->pose.pose;
+  odom_received_ = true;
+
+  if (first_odometry && goal_received_ && map_received_) {
+    planPath();
+  }
 }
 
 void PlannerNode::timerCallback(){
@@ -54,9 +71,6 @@ void PlannerNode::timerCallback(){
           RCLCPP_INFO(this->get_logger(), "Goal reached!");
           state_ = State::WAITING_FOR_GOAL;
           goal_received_ = false;
-      } else {
-          RCLCPP_INFO(this->get_logger(), "Replanning due to timeout or progress...");
-          planPath();
       }
   }
 }
@@ -68,9 +82,18 @@ bool PlannerNode::goalReached(){
 }
 
 void PlannerNode::planPath(){
-  if (!goal_received_ || !map_received_ || current_map_.data.empty()) {
-      RCLCPP_WARN(this->get_logger(), "Cannot plan path: Missing map or goal!");
+  if (!goal_received_ || !map_received_ || !odom_received_ || current_map_.data.empty()) {
+      RCLCPP_WARN(this->get_logger(), "Cannot plan path: missing map, odometry, or goal");
+      publishEmptyPath();
       return;
+  }
+
+  if (!goal_.header.frame_id.empty() &&
+      goal_.header.frame_id != current_map_.header.frame_id) {
+    RCLCPP_WARN(this->get_logger(), "Cannot plan goal in frame '%s' on map frame '%s'",
+                goal_.header.frame_id.c_str(), current_map_.header.frame_id.c_str());
+    publishEmptyPath();
+    return;
   }
 
   // Convert start and goal positions to grid cells
@@ -78,34 +101,69 @@ void PlannerNode::planPath(){
   CellIndex goal = worldToGrid(goal_.point.x, goal_.point.y);
 
   if (isCellInBounds(start)) {
-  int start_index = start.x + start.y * current_map_.info.width;
-  int8_t start_value = current_map_.data[start_index];
+    int start_index = start.x + start.y * current_map_.info.width;
+    int8_t start_value = current_map_.data[start_index];
 
-  RCLCPP_INFO(
-      this->get_logger(),
-      "Start cell: (%d, %d), value: %d, robot: (%.2f, %.2f)",
-      start.x,
-      start.y,
-      static_cast<int>(start_value),
-      robot_pose_.position.x,
-      robot_pose_.position.y);
-    } else {
-      RCLCPP_WARN(
-          this->get_logger(),
-          "Start cell out of bounds: (%d, %d), robot: (%.2f, %.2f)",
-          start.x,
-          start.y,
-          robot_pose_.position.x,
-          robot_pose_.position.y);
-    }
-
-  // Confirm the start cell is free
-  if (!isCellFree(start)) {
-    RCLCPP_WARN(this->get_logger(), "Start cell is not free!");
+    RCLCPP_INFO(
+        this->get_logger(),
+        "Start cell: (%d, %d), value: %d, robot: (%.2f, %.2f)",
+        start.x,
+        start.y,
+        static_cast<int>(start_value),
+        robot_pose_.position.x,
+        robot_pose_.position.y);
+  } else {
+    RCLCPP_WARN(
+        this->get_logger(),
+        "Start cell out of bounds: (%d, %d), robot: (%.2f, %.2f)",
+        start.x,
+        start.y,
+        robot_pose_.position.x,
+        robot_pose_.position.y);
+    publishEmptyPath();
     return;
   }
 
-    if (!isCellInBounds(goal)) {
+  const int start_index = start.x + start.y * current_map_.info.width;
+  const int start_cost = current_map_.data[start_index];
+
+  // The robot may already be inside the conservative inflation band after a
+  // turn or a map update. It must be allowed to move down the cost gradient
+  // back into free space; rejecting the start creates a permanent deadlock.
+  if (start_cost >= lethal_cost_) {
+    RCLCPP_WARN(this->get_logger(),
+                "Start cell is lethal (cost %d); refusing to plan through an obstacle",
+                start_cost);
+    publishEmptyPath();
+    return;
+  }
+
+  if (start_cost >= start_recovery_max_cost_) {
+    RCLCPP_WARN(this->get_logger(),
+                "Start cell cost %d is too deep in inflation for automatic recovery",
+                start_cost);
+    publishEmptyPath();
+    return;
+  }
+
+  CellIndex planning_start = start;
+  std::vector<CellIndex> escape_prefix;
+  if (start_cost >= cost_threshold_) {
+    RCLCPP_WARN(this->get_logger(),
+                "Start cell is in the inflated zone (cost %d); planning a decreasing-cost escape",
+                start_cost);
+    escape_prefix = findStartEscape(start);
+    if (escape_prefix.empty()) {
+      RCLCPP_WARN(this->get_logger(),
+                  "No safe decreasing-cost escape found within %.2f m",
+                  start_recovery_max_cells_ * current_map_.info.resolution);
+      publishEmptyPath();
+      return;
+    }
+    planning_start = escape_prefix.back();
+  }
+
+  if (!isCellInBounds(goal)) {
     RCLCPP_WARN(
         this->get_logger(),
         "Goal cell out of bounds: (%d, %d), goal: (%.2f, %.2f)",
@@ -113,22 +171,31 @@ void PlannerNode::planPath(){
         goal.y,
         goal_.point.x,
         goal_.point.y);
+    publishEmptyPath();
     return;
   }
 
   // Confirm the goal cell is free
   if (!isCellFree(goal)) {
     RCLCPP_WARN(this->get_logger(), "Goal cell is not free!");
+    publishEmptyPath();
     return;
   }
 
   // Run A*
-  std::vector<CellIndex> grid_path = runAStar(start, goal);
+  std::vector<CellIndex> grid_path = runAStar(planning_start, goal);
 
   // If A* fails
   if (grid_path.empty()) {
     RCLCPP_WARN(this->get_logger(), "No path found.");
+    publishEmptyPath();
     return;
+  }
+
+  if (!escape_prefix.empty()) {
+    // The last escape cell is also the first normal A* cell.
+    escape_prefix.pop_back();
+    grid_path.insert(grid_path.begin(), escape_prefix.begin(), escape_prefix.end());
   }
 
   // Create ROS path message
@@ -148,10 +215,19 @@ void PlannerNode::planPath(){
   RCLCPP_INFO(this->get_logger(), "Published path with %zu poses", path.poses.size());
 }
 
+void PlannerNode::publishEmptyPath() {
+  nav_msgs::msg::Path path;
+  path.header.stamp = this->get_clock()->now();
+  path.header.frame_id = map_received_ ? current_map_.header.frame_id : "sim_world";
+  path_pub_->publish(path);
+}
+
 // Converts to grid coordinates
 CellIndex PlannerNode::worldToGrid(double world_x, double world_y){
-  int grid_x = static_cast<int>((world_x - current_map_.info.origin.position.x) / current_map_.info.resolution);
-  int grid_y = static_cast<int>((world_y - current_map_.info.origin.position.y) / current_map_.info.resolution);
+  int grid_x = static_cast<int>(std::floor(
+      (world_x - current_map_.info.origin.position.x) / current_map_.info.resolution));
+  int grid_y = static_cast<int>(std::floor(
+      (world_y - current_map_.info.origin.position.y) / current_map_.info.resolution));
   
   return CellIndex(grid_x, grid_y);
 }
@@ -195,6 +271,75 @@ bool PlannerNode::isCellFree(const CellIndex& cell){
 
   // If value is less than threshold then it is free
   return value < cost_threshold_;
+}
+
+std::vector<CellIndex> PlannerNode::findStartEscape(const CellIndex& start) {
+  struct EscapeNode {
+    CellIndex cell;
+    int depth;
+  };
+
+  std::queue<EscapeNode> open;
+  std::unordered_set<CellIndex, CellIndexHash> visited;
+  std::unordered_map<CellIndex, CellIndex, CellIndexHash> came_from;
+  open.push({start, 0});
+  visited.insert(start);
+
+  const std::vector<CellIndex> directions = {
+    CellIndex(1, 0), CellIndex(-1, 0),
+    CellIndex(0, 1), CellIndex(0, -1),
+  };
+
+  while (!open.empty()) {
+    const EscapeNode current = open.front();
+    open.pop();
+
+    if (current.cell != start && isCellFree(current.cell)) {
+      std::vector<CellIndex> path{current.cell};
+      CellIndex cursor = current.cell;
+      while (cursor != start) {
+        cursor = came_from[cursor];
+        path.push_back(cursor);
+      }
+      std::reverse(path.begin(), path.end());
+      return path;
+    }
+
+    if (current.depth >= start_recovery_max_cells_) {
+      continue;
+    }
+
+    const int current_index =
+        current.cell.x + current.cell.y * current_map_.info.width;
+    const int current_cost = current_map_.data[current_index];
+
+    for (const CellIndex& direction : directions) {
+      const CellIndex neighbour(
+          current.cell.x + direction.x, current.cell.y + direction.y);
+      if (!isCellInBounds(neighbour) || visited.count(neighbour) > 0) {
+        continue;
+      }
+
+      const int neighbour_index =
+          neighbour.x + neighbour.y * current_map_.info.width;
+      const int neighbour_cost = current_map_.data[neighbour_index];
+      const bool safe_free_cell = isCellFree(neighbour);
+      const bool decreasing_inflation =
+          neighbour_cost >= cost_threshold_ &&
+          neighbour_cost < start_recovery_max_cost_ &&
+          neighbour_cost <= current_cost;
+
+      if (!safe_free_cell && !decreasing_inflation) {
+        continue;
+      }
+
+      visited.insert(neighbour);
+      came_from[neighbour] = current.cell;
+      open.push({neighbour, current.depth + 1});
+    }
+  }
+
+  return {};
 }
 
 // Calculate the distance to the end node
@@ -281,8 +426,17 @@ std::vector<CellIndex> PlannerNode::runAStar(const CellIndex& start, const CellI
         continue;
       }
 
-      // calculates new posssible cost
-      double tentative_g_score = g_score[current] + 1.0;
+      const int neighbour_index =
+          neighbour.x + neighbour.y * current_map_.info.width;
+      const int8_t cell_cost = current_map_.data[neighbour_index];
+
+      // Unknown space remains traversable so distant goals are reachable, but
+      // it is substantially less desirable than space actually cleared by a
+      // lidar ray. This prevents A* from cutting through the unseen interior
+      // and shadow of an obstacle when a confirmed-free route exists around it.
+      const double traversal_penalty =
+          cell_cost < 0 ? 5.0 : static_cast<double>(cell_cost) / cost_threshold_;
+      double tentative_g_score = g_score[current] + 1.0 + traversal_penalty;
 
       // Check if this path is better
       if (g_score.find(neighbour) == g_score.end() || tentative_g_score < g_score[neighbour]) {

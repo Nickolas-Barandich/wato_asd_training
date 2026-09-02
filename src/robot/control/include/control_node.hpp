@@ -35,9 +35,12 @@ class ControlNode : public rclcpp::Node {
     nav_msgs::msg::Odometry::SharedPtr robot_odom_;
 
     // Parameters
-    double lookahead_distance_ = 1.0;
+    // A shorter lookahead follows A* corners instead of cutting toward walls.
+    double lookahead_distance_ = 0.6;
     double goal_tolerance_ = 0.1;
-    double linear_speed_ = 0.5;
+    double linear_speed_ = 0.65;
+    double angular_speed_ = 0.9;
+    double turn_in_place_angle_ = 0.8;
 
     // Callbacks
     void pathCallback(const nav_msgs::msg::Path::SharedPtr msg);
